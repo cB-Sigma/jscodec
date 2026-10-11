@@ -3,6 +3,7 @@
 package jscodec
 
 import (
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -26,8 +27,26 @@ func setDataLimit(n int64) {
 
 // workerSysProcAttr kills the worker when the thread that started it
 // exits, so workers never outlive the server.
-func workerSysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+func workerSysProcAttr(namespaces bool) *syscall.SysProcAttr {
+	a := &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if namespaces {
+		// New user, network, mount, IPC and UTS namespaces; inside, the
+		// worker is root of its own user namespace mapped to our user.
+		a.Cloneflags = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET | syscall.CLONE_NEWNS | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS
+		a.UidMappings = []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}}
+		a.GidMappings = []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}}
+	}
+	return a
+}
+
+// peakRSS is this process's peak resident size in bytes (Linux reports
+// kilobytes).
+func peakRSS() int64 {
+	var ru syscall.Rusage
+	if syscall.Getrusage(syscall.RUSAGE_SELF, &ru) != nil {
+		return 0
+	}
+	return int64(ru.Maxrss) * 1024
 }
 
 func processRSS(pid int) (int64, bool) {
@@ -44,4 +63,28 @@ func processRSS(pid int) (int64, bool) {
 		return 0, false
 	}
 	return pages * int64(os.Getpagesize()), true
+}
+
+// sandboxProbe: bit 0 socket() refused, bit 1 open refused, bit 2 only
+// no route out of the network namespace.
+func sandboxProbe() int {
+	n := 0
+	if fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0); err == syscall.EPERM {
+		n |= 1
+	} else if err == nil {
+		_ = syscall.Close(fd)
+	}
+	if f, err := os.Open("/proc/self/status"); err != nil {
+		n |= 2
+	} else {
+		_ = f.Close()
+	}
+	// No route anywhere: a UDP "connection" to a documentation address
+	// fails at once in an empty network namespace.
+	if c, err := net.Dial("udp4", "192.0.2.1:9"); err != nil {
+		n |= 4
+	} else {
+		_ = c.Close()
+	}
+	return n
 }

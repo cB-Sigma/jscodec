@@ -8,14 +8,14 @@ No file of that repository is kept here. It has no LICENSE file (its
 package.json declares Apache-2.0), so the test fetches the files it needs
 at test time, from raw.githubusercontent.com at that commit, into the user
 cache directory, and checks each against files.sha256. files.sha256 lists
-the 123 files by their upstream path with their SHA-256: 57 codec YAML
-files from 11 makers (adeunis 4, browan 4, decentlab 6, dragino 8, elsys 5,
-mclimate 4, milesight-iot 8, netvox 6, sensecap 4, tektelic 4, watteco 4)
-and every JavaScript file they name. They were chosen as popular makers
-whose codec files carry examples; two sensecap files have no examples and
-are only loaded.
+the 1713 files by their upstream path with their SHA-256: the 879 YAML
+files under vendor/ that define a codec (uplinkDecoder, downlinkEncoder or
+downlinkDecoder) and the 834 JavaScript files under vendor/. Of the 879,
+700 carry examples (4270 in all); the others are only loaded.
 
 Run:  SIGMA_JSCODEC_TTN=1 go test -v ./...
+      SIGMA_JSCODEC_TTS=1 SIGMA_JSCODEC_TTN=1 go test -run TestAgainstTheThingsStack -v ./...
+                                                    (also The Things Stack's runner, in Docker)
       SIGMA_JSCODEC_TTN=/path/to/lorawan-devices go test -v ./...   (a checkout of that commit)
 
 Without SIGMA_JSCODEC_TTN, or when the files cannot be fetched, the tests

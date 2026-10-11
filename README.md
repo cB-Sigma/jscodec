@@ -22,10 +22,14 @@ oneM2M platform, whose LoRaWAN, Sigfox and raw TCP/UDP adapters use it.
 | `console.log` to an `slog.Logger` | yes |
 | In-call limits: timeout, stack depth, array, string and buffer sizes in built-ins, regular expressions with a match timeout, sampled memory allocation | yes |
 | Worker processes: pool, crash restart, CPU limit (setrlimit, Unix), data-segment limit (Linux), resident-memory watch (Linux) | yes |
-| Exact per-script memory accounting | no: the in-process sample is process-wide |
-| seccomp, namespaces, Windows job objects | no |
-| v2 (TTN classic) `Decoder(bytes, port)` as an entry point | no (scripts may still define and call it, as many makers' codecs do) |
-| Node-style `Buffer` | no (ChirpStack provides one) |
+| Every call in a fresh runtime, as in The Things Stack (`KeepState` to reuse) | yes (v0.2.0) |
+| The whole result: data together with errors, other keys, empty lists (`Result`) | yes (v0.2.0) |
+| Per-script memory and CPU accounting | per worker process, one script each (`Codec.Usage`: peak resident size, CPU time; v0.2.0); in process the memory sample is process-wide |
+| Worker sandbox on Linux: seccomp deny list, user, network, mount, IPC and UTS namespaces | yes (`Limits.Seccomp`, `Limits.Namespaces`, v0.2.0) |
+| Worker processes on Windows (job objects) | no: process isolation runs on Unix only; not built for lack of a Windows machine to test on |
+| The Things Network v2 `Decoder`, `Converter`, `Validator`, `Encoder`; ChirpStack v3 `Decode`, `Encode` | yes, when the script has no decodeUplink or encodeDownlink (v0.2.0) |
+| Node-style `Buffer` | yes, with `Limits.NodeBuffer` (v0.2.0) |
+| Finding a device's codec in the lorawan-devices repository (`devicerepo`) | yes (v0.2.0) |
 | Modules, timers, network, files | no, by design |
 
 ## Choosing a codec runner
@@ -42,8 +46,9 @@ Compared from each project's source at the versions named, in October
 | decodeDownlink, normalizeUplink | yes | yes | no | write it yourself |
 | Bounds per call | time, stack, memory sample, built-in sizes, regexp timeout | time | time | interrupt API |
 | Process isolation with OS limits | yes | no | no | no |
-| `Buffer` | no | no | yes | no |
-| Makers' examples from lorawan-devices | 244 of 244 (below) | the repository's own validator | not compared | n/a |
+| `Buffer` | yes, optional | no | yes | no |
+| Legacy entry points (TTN v2, ChirpStack v3) | yes | no (only the current names; tested) | ChirpStack v3 `Decode`/`Encode` | n/a |
+| Makers' examples from lorawan-devices (4270) | 4165 pass; the 105 others fail in The Things Stack's runner too (tested, below) | 4162 pass (run here as the reference) | not compared | n/a |
 
 Pick this module to run makers' or users' codecs inside a Go program that
 is not a LoRaWAN network server, especially when the scripts are not
@@ -94,8 +99,9 @@ API reference: https://pkg.go.dev/github.com/cB-Sigma/jscodec
 
 | Package | What it does |
 |---|---|
-| `jscodec` (module root) | `New` (compile a script), `Codec.Decode`, `Encode`, `DecodeDownlink`, `Normalize`, `FrameLength`; `Limits`; process isolation (`Process`, `WorkerCommand`, `RunWorker`, `RunWorkerWith`) |
-| `ttn` (nested module, tests only) | fetches device makers' codecs from lorawan-devices at a pinned commit and runs them against their own examples |
+| `jscodec` (module root) | `New` (compile a script), `Codec.Decode`, `Encode`, `DecodeDownlink`, `Normalize`, `FrameLength`, `Usage`; `Limits`; process isolation (`Process`, `WorkerCommand`, `RunWorker`, `RunWorkerWith`) |
+| `devicerepo` | `Open` a copy of lorawan-devices; `Vendors`, `Devices`, `Device`, `Lookup` (vendor, device, firmware, region to codec), `Codec`, `Scripts` |
+| `ttn` (nested module, tests only) | fetches every device maker's codec from lorawan-devices at a pinned commit, runs them against their own examples, and compares with The Things Stack's runner |
 
 ## Testing
 
@@ -108,7 +114,7 @@ the SigmaM2M project's compliance report and have no meaning outside it.
 
 ### Interop tested against
 
-Tested against 57 codecs from 11 makers in
+Tested against every codec of
 [TheThingsNetwork/lorawan-devices](https://github.com/TheThingsNetwork/lorawan-devices)
 at commit `900afb52024f` (2026-10-09), fetched at test time, each run
 against the examples its maker published in the codec YAML file. The
@@ -126,36 +132,39 @@ Without `SIGMA_JSCODEC_TTN`, or offline, the tests skip and say why;
 example runs in process and again in worker processes (`-short` skips the
 second pass); both give the same results.
 
-| Vendor | Codec files | Examples | Passed |
-|---|---|---|---|
-| adeunis | 4 | 4 | 4 |
-| browan | 4 | 12 | 12 |
-| decentlab | 6 | 39 | 39 |
-| dragino | 8 | 23 | 23 |
-| elsys | 5 | 7 | 7 |
-| mclimate | 4 | 12 | 12 |
-| milesight-iot | 8 | 21 | 21 |
-| netvox | 6 | 75 | 75 |
-| sensecap | 4 | 6 | 6 |
-| tektelic | 4 | 13 | 13 |
-| watteco | 4 | 32 | 32 |
-| **total** | **57** | **244** | **244** |
+On 2026-10-12 (v0.2.0): all 879 codec files, about 700
+of them with examples, 4270 examples in all (decodeUplink 2206,
+encodeDownlink 1148, decodeDownlink 883, normalizeUplink 33). 4165 pass,
+in process and in worker processes alike. The 105 others are listed in
+`ttn/known_test.go` with the reason The Things Stack's runner gives, as
+it fails each of them too: 58 scripts that do not compile (literal `\n`
+sequences in place of line breaks), 29 outputs that differ from their
+examples, 11 scripts with only the TTN v2 `Decoder` (which The Things
+Stack does not run; this module does, and passes 3 more examples that
+way), and a few that throw. 31 scripts named by codec files do not load
+(29 do not compile, one is missing, one has no entry point), listed in
+`knownLoadFailures`.
 
-By routine: decodeUplink 148, encodeDownlink 45, decodeDownlink 33,
-normalizeUplink 18. Two sensecap files have no examples; their scripts are
-only loaded.
+The Things Stack v3.36.2's JavaScript runner, the one the repository's
+validator uses, runs every example as well (`TestAgainstTheThingsStack`,
+in Docker, `SIGMA_JSCODEC_TTS=1`): every example it passes, this module
+passes; every known failure, it fails. The comparison found four
+differences, now fixed: state kept between calls (a script's globals),
+recvTime added when the example gives none, recvTime given as a YAML
+timestamp, and `instanceof` on typed array constructors.
+
+v0.1.0 ran 57 codec files of 11 makers (244 examples, all passing).
 
 Results are compared as the repository's own validator does: data and
 warnings must equal the example once both are plain JSON (numbers by
 value); an example with errors must end the call with a `DecoderError`
 carrying exactly those messages; for encodeDownlink the bytes, fPort and
-warnings must match. Not compared, because the API does not return them:
-keys a script returns beside data, bytes, warnings and errors, whether an
-empty list was present, and data returned together with errors. A second
+warnings must match; since v0.2.0 also keys beside those, through
+`Result`, and data or warnings returned together with errors. Lists the
+example leaves empty are compared by value only. A second
 test alters each passing example's expectation and checks that the
 comparison then fails. The test fails when an example outside the
-known-failure list (`ttn/known_test.go`, empty today) fails, or a listed
-one passes.
+known-failure list (`ttn/known_test.go`) fails, or a listed one passes.
 
 The run found and fixed: `decodeDownlink` and `normalizeUplink` were
 missing (51 examples), and `recvTime` lost trailing zeros (`.508306410`
@@ -179,7 +188,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability privately. The
 in-process limits are a guard, not a security boundary; run scripts you
-do not trust with `Isolation: Process`.
+do not trust with `Isolation: Process`, and on Linux add `Seccomp` and
+`Namespaces`.
 
 ## Licence
 

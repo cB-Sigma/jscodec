@@ -83,6 +83,26 @@ type Limits struct {
 	// ProcessMemory is a worker's hard memory ceiling in bytes (Process
 	// only); default 64 MiB plus four times MaxMemory.
 	ProcessMemory int64
+	// KeepState reuses a runtime from call to call, so a script's global
+	// variables carry over. By default every call runs in a fresh runtime,
+	// as The Things Stack runs codecs: state a script keeps in globals does
+	// not leak into the next call.
+	KeepState bool
+	// NodeBuffer gives scripts a Node-style Buffer (from, alloc, concat,
+	// the read and write methods, hex, base64 and UTF-8 strings), as
+	// ChirpStack provides. The Things Stack has none, so it is off by
+	// default.
+	NodeBuffer bool
+	// Namespaces (Linux, Process only) starts each worker in new user,
+	// network, mount, IPC and UTS namespaces: no network at all and no view
+	// of the host. It needs unprivileged user namespaces; where the kernel
+	// or a container refuses them, starting a worker fails.
+	Namespaces bool
+	// Seccomp (Linux, Process only) makes each worker, once its script is
+	// loaded, refuse the system calls a codec never needs: sockets,
+	// executing programs, opening files, tracing, mounting, namespaces,
+	// kernel modules, keyrings and similar (EPERM).
+	Seccomp bool
 
 	hardOnly bool // tests: the worker runs without the in-call limits
 }
@@ -234,16 +254,24 @@ const guards = `(function (MAXA, MAXS, MAXB) {
     for (var k in v) walk(v[k], depth + 1);
   }
   Object.defineProperty(JSON, 'stringify', { value: function (v) { walk(v, 0); return apply.call(stringify, JSON, arguments); }, writable: true, configurable: true });
+  var AB = ArrayBuffer;
+  // bound wraps a buffer constructor in a plain function (not a Proxy, so
+  // that instanceof keeps working on it) sharing its prototype.
   function bound(C, per) {
-    return new Proxy(C, {
-      construct: function (t, a, nt) {
-        var x = a[0];
-        if (typeof x === 'number' && x * per > MAXB) throw new RE('buffer larger than the codec sandbox allows');
-        if (x !== null && typeof x === 'object' && !(x instanceof ArrayBuffer) && len(x) * per > MAXB) throw new RE('buffer larger than the codec sandbox allows');
-        return Reflect.construct(t, a, nt);
-      },
-      apply: function (t, th, a) { return apply.call(t, th, a); }
+    var W = function () {
+      var x = arguments[0];
+      if (typeof x === 'number' && x * per > MAXB) throw new RE('buffer larger than the codec sandbox allows');
+      if (x !== null && typeof x === 'object' && !(x instanceof AB) && len(x) * per > MAXB) throw new RE('buffer larger than the codec sandbox allows');
+      if (new.target === undefined) return apply.call(C, this, arguments);
+      return Reflect.construct(C, arguments, new.target === W ? C : new.target);
+    };
+    W.prototype = C.prototype;
+    Object.getOwnPropertyNames(C).forEach(function (n) {
+      if (n === 'prototype' || n === 'length' || n === 'name' || n === 'caller' || n === 'arguments') return;
+      try { Object.defineProperty(W, n, Object.getOwnPropertyDescriptor(C, n)); } catch (e) {}
     });
+    Object.setPrototypeOf(W, Object.getPrototypeOf(C));
+    return W;
   }
   var g = this;
   g.ArrayBuffer = bound(ArrayBuffer, 1);
@@ -268,6 +296,11 @@ func (c *Codec) newRuntime() (*goja.Runtime, error) {
 	if _, err := fn(rt.GlobalObject(), rt.ToValue(c.lim.MaxArray), rt.ToValue(c.lim.MaxString), rt.ToValue(c.lim.MaxBuffer)); err != nil {
 		return nil, fmt.Errorf("installing the codec sandbox: %w", err)
 	}
+	if c.lim.NodeBuffer {
+		if _, err := rt.RunString(bufferJS); err != nil {
+			return nil, fmt.Errorf("installing Buffer: %w", err)
+		}
+	}
 	console := rt.NewObject()
 	logf := func(call goja.FunctionCall) goja.Value {
 		parts := make([]string, 0, len(call.Arguments))
@@ -289,8 +322,45 @@ func (c *Codec) newRuntime() (*goja.Runtime, error) {
 	if _, err := c.guarded(context.Background(), rt, func() (goja.Value, error) { return rt.RunProgram(c.prog) }); err != nil {
 		return nil, fmt.Errorf("running the codec script: %w", err)
 	}
+	if _, err := rt.RunString(legacy); err != nil {
+		return nil, fmt.Errorf("installing the legacy entry points: %w", err)
+	}
 	return rt, nil
 }
+
+// legacy maps the older entry points onto the current ones when the script
+// does not define those itself:
+//
+//   - The Things Network v2: Decoder(bytes, port), then Converter(data,
+//     port) and Validator(data, port) when defined (a false validation is
+//     an error), and Encoder(object, port) returning the bytes, as The
+//     Things Network v2 ran them (The Things Stack runs only the current
+//     names).
+//   - ChirpStack v3: Decode(fPort, bytes, variables) returning the object,
+//     Encode(fPort, obj, variables) returning the bytes.
+const legacy = `(function (g) {
+  'use strict';
+  function fn(n) { return typeof g[n] === 'function'; }
+  if (!fn('decodeUplink')) {
+    if (fn('Decoder')) {
+      g.decodeUplink = function (input) {
+        var data = g.Decoder(input.bytes, input.fPort);
+        if (fn('Converter')) data = g.Converter(data, input.fPort);
+        if (fn('Validator') && !g.Validator(data, input.fPort)) return { errors: ['the Validator function refused the data'] };
+        return { data: data };
+      };
+    } else if (fn('Decode')) {
+      g.decodeUplink = function (input) { return { data: g.Decode(input.fPort, input.bytes, input.variables || {}) }; };
+    }
+  }
+  if (!fn('encodeDownlink')) {
+    if (fn('Encoder')) {
+      g.encodeDownlink = function (input) { return { bytes: g.Encoder(input.data, input.fPort), fPort: input.fPort }; };
+    } else if (fn('Encode')) {
+      g.encodeDownlink = function (input) { return { bytes: g.Encode(input.fPort, input.data, input.variables || {}), fPort: input.fPort }; };
+    }
+  }
+})(this)`
 
 func (c *Codec) get() (*goja.Runtime, error) {
 	select {
@@ -397,7 +467,9 @@ func (c *Codec) call(ctx context.Context, name string, in func(rt *goja.Runtime)
 		return nil, err
 	}
 	out := v.Export()
-	c.put(rt)
+	if c.lim.KeepState {
+		c.put(rt)
+	}
 	return out, nil
 }
 
@@ -411,6 +483,10 @@ type Uplink struct {
 	// Extra fields of the input object (source address, transport, the
 	// device identified so far).
 	Extra map[string]any
+	// OmitRecvTime leaves recvTime out of the input (by default a zero
+	// RecvTime becomes the current time), as when replaying a payload
+	// whose receive time is unknown.
+	OmitRecvTime bool
 }
 
 // Decoded is decodeUplink's result.
@@ -429,10 +505,18 @@ type Decoded struct {
 	Reply []byte
 	// Time is the acquisition time the payload carries, if any.
 	Time time.Time
+	// Result is everything decodeUplink returned, as plain JSON values
+	// (keys beside data and warnings, empty lists as returned).
+	Result map[string]any
 }
 
 // DecoderError is a decodeUplink result with a non-empty errors list.
-type DecoderError struct{ Errors []string }
+type DecoderError struct {
+	Errors []string
+	// Result is everything the routine returned, as plain JSON values:
+	// data or warnings returned together with the errors, other keys.
+	Result map[string]any
+}
 
 func (e *DecoderError) Error() string {
 	return "the codec reported: " + strings.Join(e.Errors, "; ")
@@ -451,7 +535,7 @@ func (c *Codec) Decode(ctx context.Context, u Uplink) (*Decoded, error) {
 	if !c.hasDecode {
 		return nil, ErrNoDecoder
 	}
-	if u.RecvTime.IsZero() {
+	if u.RecvTime.IsZero() && !u.OmitRecvTime {
 		u.RecvTime = time.Now()
 	}
 	if c.proc != nil {
@@ -466,7 +550,9 @@ func (c *Codec) Decode(ctx context.Context, u Uplink) (*Decoded, error) {
 		if u.FPort != 0 {
 			_ = o.Set("fPort", u.FPort)
 		}
-		_ = o.Set("recvTime", recvTimeString(u.RecvTime))
+		if !u.OmitRecvTime {
+			_ = o.Set("recvTime", recvTimeString(u.RecvTime))
+		}
 		vars := map[string]any{}
 		for k, v := range u.Variables {
 			vars[k] = v
@@ -508,11 +594,11 @@ func decodedResult(fn string, out any) (*Decoded, error) {
 		return nil, fmt.Errorf("%s must return an object such as {data: {...}}", fn)
 	}
 	if errs := strList(m["errors"]); len(errs) > 0 {
-		return nil, &DecoderError{Errors: errs}
+		return nil, &DecoderError{Errors: errs, Result: resultOf(m)}
 	}
 	// Output variants that still carry usable data are kept; what was
 	// changed is added to Warnings, which the IPE shows.
-	d := &Decoded{Warnings: strList(m["warnings"])}
+	d := &Decoded{Warnings: strList(m["warnings"]), Result: resultOf(m)}
 	note := func(format string, a ...any) { d.Warnings = append(d.Warnings, fmt.Sprintf(format, a...)) }
 	if data, ok := m["data"].(map[string]any); ok {
 		d.Data = dataObject(fn, data, note)
@@ -617,6 +703,7 @@ func (c *Codec) DecodeDownlink(ctx context.Context, f DownlinkFrame) (*Decoded, 
 type Normalized struct {
 	Data     []map[string]any
 	Warnings []string
+	Result   map[string]any // everything normalizeUplink returned
 }
 
 // Normalize runs normalizeUplink on data decoded by decodeUplink. Errors in
@@ -641,9 +728,9 @@ func (c *Codec) Normalize(ctx context.Context, data map[string]any) (*Normalized
 		return nil, errors.New("normalizeUplink must return an object such as {data: {...}}")
 	}
 	if errs := strList(m["errors"]); len(errs) > 0 {
-		return nil, &DecoderError{Errors: errs}
+		return nil, &DecoderError{Errors: errs, Result: resultOf(m)}
 	}
-	n := &Normalized{Warnings: strList(m["warnings"])}
+	n := &Normalized{Warnings: strList(m["warnings"]), Result: resultOf(m)}
 	note := func(format string, a ...any) { n.Warnings = append(n.Warnings, fmt.Sprintf(format, a...)) }
 	var items []any
 	switch x := m["data"].(type) {
@@ -701,6 +788,7 @@ type Encoded struct {
 	Bytes    []byte
 	FPort    int
 	Warnings []string
+	Result   map[string]any // everything encodeDownlink returned
 }
 
 // Encode runs encodeDownlink.
@@ -735,13 +823,13 @@ func (c *Codec) Encode(ctx context.Context, d Downlink) (*Encoded, error) {
 		return nil, errors.New("encodeDownlink must return an object such as {bytes: [...]}")
 	}
 	if errs := strList(m["errors"]); len(errs) > 0 {
-		return nil, &DecoderError{Errors: errs}
+		return nil, &DecoderError{Errors: errs, Result: resultOf(m)}
 	}
 	b, err := toBytes(m["bytes"])
 	if err != nil {
 		return nil, fmt.Errorf("encodeDownlink's bytes: %w", err)
 	}
-	e := &Encoded{Bytes: b, Warnings: strList(m["warnings"])}
+	e := &Encoded{Bytes: b, Warnings: strList(m["warnings"]), Result: resultOf(m)}
 	if p, ok := num(m["fPort"]); ok {
 		e.FPort = int(p)
 	}
@@ -861,4 +949,10 @@ func plain(v any, depth int) any {
 	default:
 		return fmt.Sprint(x)
 	}
+}
+
+// resultOf is a routine's whole result as plain JSON values.
+func resultOf(m map[string]any) map[string]any {
+	r, _ := plain(m, 0).(map[string]any)
+	return r
 }

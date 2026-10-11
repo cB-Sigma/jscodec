@@ -58,10 +58,22 @@ type run struct {
 
 func loadRuns(t *testing.T) (runs []run, codecs map[string]int, scripts []string) {
 	t.Helper()
-	vendorDir := filepath.Join(codecRoot(t), "vendor")
-	files, err := filepath.Glob(filepath.Join(vendorDir, "*", "*codec.yaml"))
-	if err != nil || len(files) == 0 {
-		t.Fatalf("no codec files under %s: %v", vendorDir, err)
+	root := codecRoot(t)
+	vendorDir := filepath.Join(root, "vendor")
+	manifest, err := readManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every codec file of the repository: the YAML files of the manifest
+	// (the manifest lists only codec YAML files and scripts).
+	var files []string
+	for _, e := range manifest {
+		if strings.HasSuffix(e.path, ".yaml") {
+			files = append(files, filepath.Join(root, filepath.FromSlash(e.path)))
+		}
+	}
+	if len(files) == 0 {
+		t.Fatalf("no codec files under %s", vendorDir)
 	}
 	sort.Strings(files)
 	codecs = map[string]int{}
@@ -72,16 +84,19 @@ func loadRuns(t *testing.T) (runs []run, codecs map[string]int, scripts []string
 		}
 		var cf codecFile
 		if err := yaml.Unmarshal(b, &cf); err != nil {
-			t.Fatalf("%s: %v", f, err)
+			t.Errorf("%s: %v", f, err)
+			continue
 		}
-		vendor := filepath.Base(filepath.Dir(f))
-		name := vendor + "/" + filepath.Base(f)
+		rel, _ := filepath.Rel(vendorDir, f)
+		rel = filepath.ToSlash(rel)
+		vendor, _, _ := strings.Cut(rel, "/")
+		name := rel
 		codecs[vendor]++
 		add := func(r *routine, fn string) {
 			if r == nil {
 				return
 			}
-			script := filepath.Join(vendorDir, vendor, filepath.FromSlash(r.FileName))
+			script := filepath.Join(filepath.Dir(f), filepath.FromSlash(r.FileName))
 			scripts = append(scripts, script)
 			for i, ex := range r.Examples {
 				runs = append(runs, run{id: fmt.Sprintf("%s %s %d", name, fn, i), vendor: vendor, routine: fn, script: script, ex: ex})
@@ -206,17 +221,42 @@ func check(ctx context.Context, k *cache, r run) string {
 		return "loading the script: " + err.Error()
 	}
 	in, want := r.ex.Input, r.ex.Output
-	for k := range in {
+	// Other input fields go to the script as they are, as the repository's
+	// runner passes the whole input object.
+	extraIn := map[string]any{}
+	for k, v := range in {
 		switch k {
 		case "bytes", "fPort", "recvTime", "data", "warnings", "errors":
 		default:
-			return "the example input has a field the test does not pass on: " + k
+			extraIn[k] = plainJSON(v)
 		}
 	}
 	wantErrs := strs(want["errors"])
 	wantWarn := strs(want["warnings"])
+	// extra compares what the API keeps only in Result (v0.2.0): data
+	// returned together with errors, keys beside data, warnings and errors
+	// in the example. Lists the example gives empty are compared by value
+	// only (The Things Stack's runner leaves empty lists out of its output).
+	extra := func(res map[string]any, withErrs bool) string {
+		for k, w := range want {
+			switch k {
+			case "warnings", "errors":
+				continue
+			case "data":
+				if !withErrs {
+					continue
+				}
+			}
+			if g := plainJSON(res[k]); !reflect.DeepEqual(g, plainJSON(w)) {
+				gb, _ := json.Marshal(g)
+				wb, _ := json.Marshal(plainJSON(w))
+				return fmt.Sprintf("%s differs:\n got %s\nwant %s", k, gb, wb)
+			}
+		}
+		return ""
+	}
 	// result compares an error and the decoded fields with the example.
-	result := func(err error, data any, warnings []string) string {
+	result := func(err error, data any, warnings []string, res map[string]any) string {
 		if len(wantErrs) > 0 {
 			var de *jscodec.DecoderError
 			if !errors.As(err, &de) {
@@ -225,7 +265,10 @@ func check(ctx context.Context, k *cache, r run) string {
 			if !equalStrs(de.Errors, wantErrs) {
 				return fmt.Sprintf("want errors %q, got %q", wantErrs, de.Errors)
 			}
-			return ""
+			if w, ok := want["warnings"]; ok && !equalStrs(strs(de.Result["warnings"]), strs(w)) {
+				return fmt.Sprintf("want warnings %q with the errors, got %q", strs(w), strs(de.Result["warnings"]))
+			}
+			return extra(de.Result, true)
 		}
 		if err != nil {
 			return "error: " + err.Error()
@@ -238,7 +281,7 @@ func check(ctx context.Context, k *cache, r run) string {
 		if !equalStrs(warnings, wantWarn) {
 			return fmt.Sprintf("want warnings %q, got %q", wantWarn, warnings)
 		}
-		return ""
+		return extra(res, false)
 	}
 	switch r.routine {
 	case "decodeUplink", "decodeDownlink":
@@ -248,29 +291,32 @@ func check(ctx context.Context, k *cache, r run) string {
 		}
 		var d *jscodec.Decoded
 		if r.routine == "decodeUplink" {
-			u := jscodec.Uplink{Bytes: b, FPort: fport(in["fPort"])}
-			if s, ok := in["recvTime"].(string); ok {
-				if u.RecvTime, err = time.Parse(time.RFC3339Nano, s); err != nil {
+			u := jscodec.Uplink{Bytes: b, FPort: fport(in["fPort"]), Extra: extraIn, OmitRecvTime: in["recvTime"] == nil}
+			switch rt := in["recvTime"].(type) {
+			case string:
+				if u.RecvTime, err = time.Parse(time.RFC3339Nano, rt); err != nil {
 					return "example input: " + err.Error()
 				}
+			case time.Time: // an unquoted YAML timestamp
+				u.RecvTime = rt
 			}
 			d, err = c.Decode(ctx, u)
 		} else {
-			d, err = c.DecodeDownlink(ctx, jscodec.DownlinkFrame{Bytes: b, FPort: fport(in["fPort"])})
+			d, err = c.DecodeDownlink(ctx, jscodec.DownlinkFrame{Bytes: b, FPort: fport(in["fPort"]), Extra: extraIn})
 		}
 		if d == nil {
-			return result(err, nil, nil)
+			return result(err, nil, nil, nil)
 		}
 		var data any
 		if d.Data != nil {
 			data = d.Data
 		}
-		return result(err, data, d.Warnings)
+		return result(err, data, d.Warnings, d.Result)
 	case "normalizeUplink":
 		data, _ := plainJSON(in["data"]).(map[string]any)
 		n, err := c.Normalize(ctx, data)
 		if n == nil {
-			return result(err, nil, nil)
+			return result(err, nil, nil, nil)
 		}
 		// The validator wraps a single object in a list; so does Normalize.
 		if w, ok := want["data"].(map[string]any); ok {
@@ -280,11 +326,11 @@ func check(ctx context.Context, k *cache, r run) string {
 		if n.Data != nil {
 			got = n.Data
 		}
-		return result(err, got, n.Warnings)
+		return result(err, got, n.Warnings, nil)
 	case "encodeDownlink":
-		e, err := c.Encode(ctx, jscodec.Downlink{Data: plainJSON(in["data"]), FPort: fport(in["fPort"])})
+		e, err := c.Encode(ctx, jscodec.Downlink{Data: plainJSON(in["data"]), FPort: fport(in["fPort"]), Extra: extraIn})
 		if len(wantErrs) > 0 || err != nil {
-			return result(err, nil, nil)
+			return result(err, nil, nil, nil)
 		}
 		wb, err := toBytes(want["bytes"])
 		if err != nil {
@@ -299,13 +345,14 @@ func check(ctx context.Context, k *cache, r run) string {
 		if !equalStrs(e.Warnings, wantWarn) {
 			return fmt.Sprintf("want warnings %q, got %q", wantWarn, e.Warnings)
 		}
-		return ""
+		return extra(e.Result, false)
 	}
 	return "unknown routine " + r.routine
 }
 
 // TestCodecExamples runs every example in process and, unless -short, in
 // worker processes, which must give the same results.
+// Covers: SIG-IPE-6745
 func TestCodecExamples(t *testing.T) {
 	t.Run(string(jscodec.InProcess), func(t *testing.T) { runExamples(t, jscodec.InProcess) })
 	t.Run(string(jscodec.Process), func(t *testing.T) {
@@ -323,10 +370,31 @@ func runExamples(t *testing.T, iso jscodec.Isolation) {
 	runs, codecs, scripts := loadRuns(t)
 	ctx := context.Background()
 	cache := newCache(t, iso)
-	// Every script a codec file names must load, examples or not.
+	// Every script a codec file names must load, examples or not, except
+	// the known broken ones.
+	root := codecRoot(t)
+	loaded := map[string]bool{}
 	for _, s := range scripts {
-		if _, err := cache.codec(s); err != nil {
-			t.Errorf("%s: %v", s, err)
+		rel, _ := filepath.Rel(root, s)
+		rel = filepath.ToSlash(rel)
+		if loaded[rel] {
+			continue
+		}
+		loaded[rel] = true
+		_, err := cache.codec(s)
+		why, listed := knownLoadFailures[rel]
+		switch {
+		case err != nil && !listed:
+			t.Errorf("%s: %v", rel, err)
+		case err == nil && listed:
+			t.Errorf("%s loads now; remove it from knownLoadFailures", rel)
+		case err != nil:
+			t.Logf("known load failure %s: %s", rel, why)
+		}
+	}
+	for rel := range knownLoadFailures {
+		if !loaded[rel] {
+			t.Errorf("knownLoadFailures lists %s, which no codec file names", rel)
 		}
 	}
 	type tally struct{ examples, passed, known int }

@@ -19,6 +19,9 @@ Dependencies
 - github.com/dop251/goja (MIT licence): the ECMAScript engine.
 - github.com/dlclark/regexp2/v2 (MIT licence): regular expressions with a
   match timeout.
+- golang.org/x/sys (BSD-3-Clause, Copyright The Go Authors): the Linux
+  seccomp filter.
+- gopkg.in/yaml.v3 (MIT and Apache-2.0): the YAML files of devicerepo.
 - Indirect, through goja: github.com/go-sourcemap/sourcemap (BSD-2-Clause),
   github.com/google/pprof (Apache-2.0), golang.org/x/text (BSD-3-Clause).
 
@@ -36,10 +39,14 @@ their examples from TheThingsNetwork/lorawan-devices
 here: the test fetches them at test time from that commit, when
 SIGMA_JSCODEC_TTN is set, and checks them against the SHA-256 sums in
 ttn/testdata/files.sha256 (a list of upstream paths and sums, no content).
-The codecs belong to the respective device makers (adeunis, Browan,
-Decentlab, Dragino, Elsys, MClimate, Milesight IoT, Netvox, SenseCAP,
-Tektelic, Watteco) and The Things Network Foundation; see
-ttn/testdata/SOURCE.txt.
+The codecs belong to the respective device makers and The Things Network
+Foundation; see ttn/testdata/SOURCE.txt.
+
+The ttn module's reference runner (ttn/tts) is built in Docker on the
+tester's machine from The Things Stack v3.36.2
+(go.thethings.network/lorawan-stack/v3, Apache-2.0, The Things Network
+Foundation and The Things Industries B.V.) and our tts/oracle.go; no code
+of The Things Stack is in this repository.
 
 The ttn module also uses gopkg.in/yaml.v3 (MIT and Apache-2.0) to read
 the codec YAML files.

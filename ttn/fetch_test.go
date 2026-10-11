@@ -110,31 +110,62 @@ func prepareRoot() {
 	}
 	dir := filepath.Join(cache, "cb-sigma-jscodec-ttn", upstreamCommit)
 	client := &http.Client{Timeout: 30 * time.Second}
-	for _, e := range files {
-		dst := filepath.Join(dir, filepath.FromSlash(e.path))
-		if fileSum(dst) == e.sum {
-			continue
-		}
-		b, err := download(client, e.path)
-		if err != nil {
-			rootSkip = fmt.Sprintf("cannot fetch the codecs (offline?): %v", err)
-			return
-		}
-		s := sha256.Sum256(b)
-		if got := hex.EncodeToString(s[:]); got != e.sum {
-			rootErr = fmt.Sprintf("%s at commit %s has sha256 %s, want %s", e.path, upstreamCommit[:12], got, e.sum)
-			return
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			rootErr = err.Error()
-			return
-		}
-		if err := os.WriteFile(dst, b, 0o644); err != nil {
-			rootErr = err.Error()
-			return
-		}
+	// Sixteen downloads at a time; the first problem stops the rest.
+	var mu sync.Mutex
+	work := make(chan manifestEntry)
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for e := range work {
+				mu.Lock()
+				stop := rootSkip != "" || rootErr != ""
+				mu.Unlock()
+				if stop {
+					continue
+				}
+				skip, fault := fetchOne(client, dir, e)
+				mu.Lock()
+				if rootSkip == "" && rootErr == "" {
+					rootSkip, rootErr = skip, fault
+				}
+				mu.Unlock()
+			}
+		}()
 	}
-	rootDir = dir
+	for _, e := range files {
+		work <- e
+	}
+	close(work)
+	wg.Wait()
+	if rootSkip == "" && rootErr == "" {
+		rootDir = dir
+	}
+}
+
+// fetchOne makes dir/e.path hold the file at the pinned commit; it returns
+// why the codecs are unavailable (skip) or wrong (fault).
+func fetchOne(client *http.Client, dir string, e manifestEntry) (skip, fault string) {
+	dst := filepath.Join(dir, filepath.FromSlash(e.path))
+	if fileSum(dst) == e.sum {
+		return "", ""
+	}
+	b, err := download(client, e.path)
+	if err != nil {
+		return fmt.Sprintf("cannot fetch the codecs (offline?): %v", err), ""
+	}
+	s := sha256.Sum256(b)
+	if got := hex.EncodeToString(s[:]); got != e.sum {
+		return "", fmt.Sprintf("%s at commit %s has sha256 %s, want %s", e.path, upstreamCommit[:12], got, e.sum)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return "", err.Error()
+	}
+	if err := os.WriteFile(dst, b, 0o644); err != nil {
+		return "", err.Error()
+	}
+	return "", ""
 }
 
 func download(client *http.Client, path string) ([]byte, error) {

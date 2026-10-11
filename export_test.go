@@ -14,3 +14,8 @@ func CrashWorker(ctx context.Context, c *Codec) error {
 	_, err := c.proc.do(ctx, &wireReq{Op: "crash"})
 	return err
 }
+
+// SandboxProbe reports what a worker may do: bit 0 set when socket()
+// is refused, bit 1 when opening a file is refused, bit 2 when the
+// worker sees no network interface but loopback.
+func SandboxProbe(ctx context.Context, c *Codec) (int, error) { return c.proc.probe(ctx) }

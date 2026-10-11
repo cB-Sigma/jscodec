@@ -5,6 +5,8 @@ go 1.26.0
 require (
 	github.com/dlclark/regexp2/v2 v2.5.2
 	github.com/dop251/goja v0.0.0-20260917113740-793a2a65c13b
+	golang.org/x/sys v0.48.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

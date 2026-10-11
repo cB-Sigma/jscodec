@@ -92,6 +92,9 @@ type wireLimits struct {
 	ProcessMemory int64         `json:"processMemory"`
 	CPUSeconds    uint64        `json:"cpuSeconds"`
 	HardOnly      bool          `json:"hardOnly,omitempty"`
+	KeepState     bool          `json:"keepState,omitempty"`
+	NodeBuffer    bool          `json:"nodeBuffer,omitempty"`
+	Seccomp       bool          `json:"seccomp,omitempty"`
 }
 
 type wireReq struct {
@@ -108,9 +111,10 @@ type wireReq struct {
 }
 
 type wireErr struct {
-	Kind   string   `json:"kind"`
-	Msg    string   `json:"msg"`
-	Errors []string `json:"errors,omitempty"`
+	Kind   string         `json:"kind"`
+	Msg    string         `json:"msg"`
+	Errors []string       `json:"errors,omitempty"`
+	Result map[string]any `json:"result,omitempty"`
 }
 
 type wireResp struct {
@@ -125,6 +129,7 @@ type wireResp struct {
 	Normalized    *Normalized   `json:"normalized,omitempty"`
 	N             int           `json:"n,omitempty"`
 	CPU           time.Duration `json:"cpu,omitempty"` // the worker's CPU time so far
+	PeakRSS       int64         `json:"peakRSS,omitempty"`
 }
 
 var errKinds = map[string]error{
@@ -139,7 +144,7 @@ func toWireErr(err error) *wireErr {
 	}
 	var de *DecoderError
 	if errors.As(err, &de) {
-		return &wireErr{Kind: "decoder", Msg: err.Error(), Errors: de.Errors}
+		return &wireErr{Kind: "decoder", Msg: err.Error(), Errors: de.Errors, Result: de.Result}
 	}
 	for k, e := range errKinds {
 		if errors.Is(err, e) {
@@ -160,7 +165,7 @@ func (e *remoteError) Unwrap() error { return e.is }
 
 func (w *wireErr) err() error {
 	if w.Kind == "decoder" {
-		return &DecoderError{Errors: w.Errors}
+		return &DecoderError{Errors: w.Errors, Result: numMap(w.Result)}
 	}
 	if s, ok := errKinds[w.Kind]; ok {
 		if w.Msg == s.Error() {
@@ -253,11 +258,24 @@ type procPool struct {
 	mu     sync.Mutex
 	closed bool
 	all    map[*worker]struct{}
+	usage  Usage
+}
+
+// account adds a worker's report to the pool's usage.
+func (p *procPool) account(r *wireResp) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.usage.Calls++
+	p.usage.PeakRSS = max(p.usage.PeakRSS, r.PeakRSS)
+	p.usage.WorkerCPU = max(p.usage.WorkerCPU, r.CPU)
 }
 
 func newProcess(name, source string, lim Limits, log *slog.Logger) (*Codec, error) {
 	if !processSupported {
 		return nil, errors.New("codec process isolation is not supported on this platform")
+	}
+	if (lim.Namespaces || lim.Seccomp) && runtime.GOOS != "linux" {
+		return nil, errors.New("codec namespaces and seccomp are available on Linux only")
 	}
 	// The CPU cap covers a worker's life; workers retire at 80% of it.
 	cpu := max(60*time.Second, 600*lim.Timeout)
@@ -358,7 +376,7 @@ func (p *procPool) forget(w *worker) {
 }
 
 func (p *procPool) spawn(ctx context.Context) (*worker, *wireResp, error) {
-	w, err := startWorker(p.log, p.name)
+	w, err := startWorker(p.log, p.name, p.lim.Namespaces)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -373,7 +391,7 @@ func (p *procPool) spawn(ctx context.Context) (*worker, *wireResp, error) {
 	l := p.lim
 	req := &wireReq{Op: "load", Name: p.name, Source: p.source, Debug: p.log.Enabled(ctx, slog.LevelDebug),
 		Limits: &wireLimits{Timeout: l.Timeout, MaxMemory: l.MaxMemory, MaxStack: l.MaxStack, MaxArray: l.MaxArray,
-			MaxString: l.MaxString, MaxBuffer: l.MaxBuffer, ProcessMemory: l.ProcessMemory, CPUSeconds: p.cpuSeconds,
+			MaxString: l.MaxString, MaxBuffer: l.MaxBuffer, ProcessMemory: l.ProcessMemory, CPUSeconds: p.cpuSeconds, KeepState: l.KeepState, NodeBuffer: l.NodeBuffer, Seccomp: l.Seccomp,
 			HardOnly: l.hardOnly}}
 	// Starting the binary is included in the load deadline.
 	resp, err := w.roundTrip(ctx, req, 10*time.Second+p.hardDeadline(), p.rssLimit())
@@ -400,6 +418,7 @@ func (p *procPool) do(ctx context.Context, req *wireReq) (*wireResp, error) {
 	resp, err := w.roundTrip(ctx, req, p.hardDeadline(), p.rssLimit())
 	if err == nil {
 		w.cpu = resp.CPU
+		p.account(resp)
 	}
 	p.release(w, err == nil)
 	if err != nil {
@@ -428,6 +447,7 @@ func workerDecoded(resp *wireResp) (*Decoded, error) {
 	for i, e := range d.Events {
 		d.Events[i] = numMap(e)
 	}
+	d.Result = numMap(d.Result)
 	return d, nil
 }
 
@@ -451,6 +471,7 @@ func (p *procPool) normalize(ctx context.Context, data map[string]any) (*Normali
 	for i, e := range n.Data {
 		n.Data[i] = numMap(e)
 	}
+	n.Result = numMap(n.Result)
 	return n, nil
 }
 
@@ -462,6 +483,7 @@ func (p *procPool) encode(ctx context.Context, dl Downlink) (*Encoded, error) {
 	if resp.Encoded == nil {
 		return nil, errors.New("the codec worker returned no result")
 	}
+	resp.Encoded.Result = numMap(resp.Encoded.Result)
 	return resp.Encoded, nil
 }
 
@@ -487,7 +509,7 @@ type worker struct {
 	killOnce sync.Once
 }
 
-func startWorker(log *slog.Logger, name string) (*worker, error) {
+func startWorker(log *slog.Logger, name string, namespaces bool) (*worker, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("finding this program to start a codec worker: %w", err)
@@ -516,7 +538,7 @@ func startWorker(log *slog.Logger, name string) (*worker, error) {
 	// not see the server's secrets.
 	cmd.Env = []string{"GOMAXPROCS=2", "GOTRACEBACK=single"}
 	cmd.Dir = "/"
-	cmd.SysProcAttr = workerSysProcAttr()
+	cmd.SysProcAttr = workerSysProcAttr(namespaces)
 	err = cmd.Start()
 	inR.Close()
 	outW.Close()
@@ -698,4 +720,34 @@ func relayStderr(r io.Reader, t *tail, log *slog.Logger, name string, pid int) {
 			t.add(line)
 		}
 	}
+}
+
+// Usage is what a codec's worker processes reported (Process isolation
+// only; one script per worker, so the figures are that script's).
+type Usage struct {
+	// Calls answered by workers.
+	Calls int
+	// PeakRSS is the largest peak resident size of any worker, in bytes.
+	PeakRSS int64
+	// WorkerCPU is the largest CPU time any worker had used.
+	WorkerCPU time.Duration
+}
+
+// Usage reports the worker processes' figures; in process it is zero.
+func (c *Codec) Usage() Usage {
+	if c == nil || c.proc == nil {
+		return Usage{}
+	}
+	c.proc.mu.Lock()
+	defer c.proc.mu.Unlock()
+	return c.proc.usage
+}
+
+// probe asks a worker what its sandbox lets it do (tests).
+func (p *procPool) probe(ctx context.Context) (int, error) {
+	resp, err := p.do(ctx, &wireReq{Op: "probe"})
+	if err != nil {
+		return 0, err
+	}
+	return resp.N, nil
 }

@@ -64,12 +64,15 @@ func serveWorker(stdin io.Reader, stdout io.Writer, replace func([]string, slog.
 				break
 			}
 			workerCall(c, &req, resp)
+		case "probe": // tests: what the sandbox lets the worker do
+			resp.N = sandboxProbe()
 		case "crash": // tests: an abrupt exit in the middle of a call
 			os.Exit(3)
 		default:
 			resp.Err = toWireErr(fmt.Errorf("the codec worker does not know %q", req.Op))
 		}
 		resp.CPU = cpuTime()
+		resp.PeakRSS = peakRSS()
 		if err := writeFrame(stdout, resp); err != nil {
 			return exitProtocol
 		}
@@ -85,7 +88,7 @@ func workerLoad(c *Codec, req *wireReq, log *slog.Logger) (*Codec, error) {
 		return nil, errors.New("the codec worker needs limits")
 	}
 	lim := Limits{Timeout: l.Timeout, MaxMemory: l.MaxMemory, MaxStack: l.MaxStack, MaxArray: l.MaxArray,
-		MaxString: l.MaxString, MaxBuffer: l.MaxBuffer, Isolation: InProcess}
+		MaxString: l.MaxString, MaxBuffer: l.MaxBuffer, Isolation: InProcess, KeepState: l.KeepState, NodeBuffer: l.NodeBuffer}
 	if l.HardOnly {
 		lim.Timeout, lim.MaxMemory = time.Hour, 1<<50
 	}
@@ -97,7 +100,13 @@ func workerLoad(c *Codec, req *wireReq, log *slog.Logger) (*Codec, error) {
 	if l.CPUSeconds > 0 {
 		setCPULimit(l.CPUSeconds)
 	}
-	return New(req.Name, req.Source, lim, log)
+	c, err := New(req.Name, req.Source, lim, log)
+	if err == nil && l.Seccomp {
+		if err = installSeccomp(); err != nil {
+			err = fmt.Errorf("the codec worker could not install its system call filter: %w", err)
+		}
+	}
+	return c, err
 }
 
 func workerCall(c *Codec, req *wireReq, resp *wireResp) {
