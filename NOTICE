@@ -29,17 +29,16 @@ Every script, payload, IMEI and value in the tests and the example of this
 module is a made-up demo value.
 
 The nested test-only module ttn (ttn/, its own go.mod; nothing imports it
-and it is not part of this module) carries device makers' payload codecs
-and their examples, unchanged, from TheThingsNetwork/lorawan-devices
+and it is not part of this module) runs device makers' payload codecs and
+their examples from TheThingsNetwork/lorawan-devices
 (https://github.com/TheThingsNetwork/lorawan-devices, commit
-900afb52024f795f073ee4192d845af12d2168d0), under ttn/testdata/lorawan-devices.
-That repository declares the Apache License 2.0 (in its package.json; it
-has no LICENSE file), with The Things Network Foundation as author; the
-codecs and examples are contributed by the respective device makers
-(adeunis, Browan, Decentlab, Dragino, Elsys, MClimate, Milesight IoT,
-Netvox, SenseCAP, Tektelic, Watteco), and files that carry a maker's own
-copyright header keep it. A copy of the licence text is in
-ttn/testdata/lorawan-devices/LICENSE; where the files come from is in
+900afb52024f795f073ee4192d845af12d2168d0). None of those files is included
+here: the test fetches them at test time from that commit, when
+SIGMA_JSCODEC_TTN is set, and checks them against the SHA-256 sums in
+ttn/testdata/files.sha256 (a list of upstream paths and sums, no content).
+The codecs belong to the respective device makers (adeunis, Browan,
+Decentlab, Dragino, Elsys, MClimate, Milesight IoT, Netvox, SenseCAP,
+Tektelic, Watteco) and The Things Network Foundation; see
 ttn/testdata/SOURCE.txt.
 
 The ttn module also uses gopkg.in/yaml.v3 (MIT and Apache-2.0) to read

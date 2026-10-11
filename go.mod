@@ -12,3 +12,6 @@ require (
 	github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )
+
+// v0.1.0 carried third-party codec files by mistake; see CHANGELOG.md.
+retract v0.1.0

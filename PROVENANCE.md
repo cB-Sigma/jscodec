@@ -10,8 +10,9 @@ SigmaM2M's log redaction became a hook (`RunWorkerWith`; `RunWorker`
 passes none). example_test.go was written for this module.
 
 On 2026-10-11 device makers' codecs from TheThingsNetwork/lorawan-devices
-were run against their own examples (the nested module `ttn`). That run
-led to `DecodeDownlink`, `Normalize` and the recvTime format.
+were run against their own examples (the nested module `ttn`, which
+fetches them at test time from a pinned commit; none is included here).
+That run led to `DecodeDownlink`, `Normalize` and the recvTime format.
 
 ## Sources
 

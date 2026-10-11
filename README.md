@@ -95,7 +95,7 @@ API reference: https://pkg.go.dev/github.com/cB-Sigma/jscodec
 | Package | What it does |
 |---|---|
 | `jscodec` (module root) | `New` (compile a script), `Codec.Decode`, `Encode`, `DecodeDownlink`, `Normalize`, `FrameLength`; `Limits`; process isolation (`Process`, `WorkerCommand`, `RunWorker`, `RunWorkerWith`) |
-| `ttn` (nested module, tests only) | runs device makers' codecs from lorawan-devices against their own examples |
+| `ttn` (nested module, tests only) | fetches device makers' codecs from lorawan-devices at a pinned commit and runs them against their own examples |
 
 ## Testing
 
@@ -108,19 +108,23 @@ the SigmaM2M project's compliance report and have no meaning outside it.
 
 ### Interop tested against
 
-Real device makers' codecs from
+Tested against 57 codecs from 11 makers in
 [TheThingsNetwork/lorawan-devices](https://github.com/TheThingsNetwork/lorawan-devices)
-(commit `900afb52024f`, 2026-10-09; fetched 2026-10-11), run against the
-examples each maker published in its codec YAML file. The nested
-test-only module `ttn` carries the codecs unchanged
-(`ttn/testdata/SOURCE.txt`):
+at commit `900afb52024f` (2026-10-09), fetched at test time, each run
+against the examples its maker published in the codec YAML file. The
+codecs are not included in this repository (lorawan-devices has no
+LICENSE file): the nested test-only module `ttn` downloads them from that
+commit into the user cache directory and checks each file's SHA-256
+against `ttn/testdata/files.sha256` (see `ttn/testdata/SOURCE.txt`):
 
 ```
-cd ttn && go test -v ./...
+cd ttn && SIGMA_JSCODEC_TTN=1 go test -v ./...
 ```
 
-Every example runs in process and again in worker processes (`-short`
-skips the second pass); both give the same results.
+Without `SIGMA_JSCODEC_TTN`, or offline, the tests skip and say why;
+`SIGMA_JSCODEC_TTN=<dir>` uses a checkout of that commit instead. Every
+example runs in process and again in worker processes (`-short` skips the
+second pass); both give the same results.
 
 | Vendor | Codec files | Examples | Passed |
 |---|---|---|---|

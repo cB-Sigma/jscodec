@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package ttn runs real device makers' payload codecs from
-// TheThingsNetwork/lorawan-devices (testdata/SOURCE.txt) through jscodec and
+// TheThingsNetwork/lorawan-devices (fetched at test time; fetch_test.go and
+// testdata/SOURCE.txt) through jscodec and
 // checks each against the examples its maker published in the codec's YAML
 // file. The comparison follows the repository's own validator: the
 // routine's result must equal the example output once both are plain JSON.
@@ -27,8 +28,6 @@ import (
 	"github.com/cB-Sigma/jscodec"
 	"gopkg.in/yaml.v3"
 )
-
-const vendorDir = "testdata/lorawan-devices/vendor"
 
 type example struct {
 	Description      string         `yaml:"description"`
@@ -59,6 +58,7 @@ type run struct {
 
 func loadRuns(t *testing.T) (runs []run, codecs map[string]int, scripts []string) {
 	t.Helper()
+	vendorDir := filepath.Join(codecRoot(t), "vendor")
 	files, err := filepath.Glob(filepath.Join(vendorDir, "*", "*codec.yaml"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no codec files under %s: %v", vendorDir, err)
