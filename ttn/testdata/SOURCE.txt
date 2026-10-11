@@ -1,0 +1,28 @@
+Where the files under lorawan-devices/ come from
+================================================
+
+Repository: https://github.com/TheThingsNetwork/lorawan-devices
+Commit:     900afb52024f795f073ee4192d845af12d2168d0 (master, committed 2026-10-09)
+Fetched:    2026-10-11, file by file from raw.githubusercontent.com at that
+            commit; the repository was not cloned.
+
+Paths under lorawan-devices/vendor/ are the upstream paths. Each codec
+YAML file is kept with every JavaScript file it names (shared files such as
+elsys/elsys.js and decentlab/dl-downlink-codec.js once). The files are
+unchanged; makers' copyright headers stay in place.
+
+Vendors and codec files taken (57 codec files, 11 vendors): adeunis 4,
+browan 4, decentlab 6, dragino 8, elsys 5, mclimate 4, milesight-iot 8,
+netvox 6, sensecap 4, tektelic 4, watteco 4. They were chosen as popular
+makers whose codec files carry examples; two sensecap files
+(sensecapt1000-tracker-ab, sensecap2120-8-in-1) have no examples and are
+only loaded.
+
+Licence: the repository has no LICENSE file at that commit. Its
+package.json declares "license": "Apache-2.0" with "author": "The Things
+Network Foundation". lorawan-devices/LICENSE here is the Apache License 2.0
+text, added by us so the licence travels with the files.
+
+Not used: the repository's device, profile and image files, and its
+validator (bin/validate.js, tools/runscript), which the test follows in
+spirit only (see ../examples_test.go).
